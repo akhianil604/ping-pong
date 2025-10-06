@@ -19,6 +19,15 @@ class Ball:
         self.speed_increase = 1.06  # on paddle hit
         self._set_initial_velocity()
 
+        # Optional event callbacks
+        self.on_wall_bounce = None
+        self.on_paddle_bounce = None
+
+    # --- public: allow engine to hook sounds ---
+    def set_callbacks(self, *, on_wall_bounce=None, on_paddle_bounce=None):
+        self.on_wall_bounce = on_wall_bounce
+        self.on_paddle_bounce = on_paddle_bounce
+
     def _set_initial_velocity(self, direction=None):
         # Start with a mostly-horizontal vector
         angle = random.uniform(-0.35, 0.35)  # ~±20°
@@ -36,12 +45,17 @@ class Ball:
         return self.y + self.height / 2.0
 
     def _wall_bounce(self):
+        bounced = False
         if self.y <= 0:
             self.y = 0
             self.vy = -self.vy
+            bounced = True
         elif self.y + self.height >= self.screen_height:
             self.y = self.screen_height - self.height
             self.vy = -self.vy
+            bounced = True
+        if bounced and callable(self.on_wall_bounce):
+            self.on_wall_bounce()
 
     def _paddle_bounce(self, paddle):
         # Determine which side we hit based on incoming direction
@@ -76,13 +90,14 @@ class Ball:
         if abs(self.vy) < 60:
             self.vy = math.copysign(60, self.vy if self.vy != 0 else (rel or 1))
 
+        if callable(self.on_paddle_bounce):
+            self.on_paddle_bounce()
 
     def speed(self):
         return math.hypot(self.vx, self.vy)
 
     def advance(self, dt: float, player, ai):
-        # Substep integration to avoid tunneling
-        # move in <= 4px micro-steps
+        # Substep integration to avoid tunneling — move in <= 4px steps
         max_comp = max(abs(self.vx), abs(self.vy))
         steps = max(1, int((max_comp * dt) / 4.0))
         step_dt = dt / steps
@@ -92,10 +107,10 @@ class Ball:
             self.x += self.vx * step_dt
             self.y += self.vy * step_dt
 
-            # Walls
+            # Walls (triggers wall sound inside)
             self._wall_bounce()
 
-            # Paddles
+            # Paddles (trigger paddle sound inside)
             b = self.rect()
             if b.colliderect(player.rect()) and self.vx < 0:
                 self._paddle_bounce(player)

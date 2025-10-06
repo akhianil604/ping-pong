@@ -1,3 +1,7 @@
+import os
+import math
+import struct
+import wave
 import pygame
 from .paddle import Paddle
 from .ball import Ball
@@ -12,6 +16,84 @@ STATE_SERIES_INTERMISSION = "INTERMISSION"
 MENU_FIRST_CHOICE = "FIRST_CHOICE"   # after the very first standalone game
 MENU_POST_SERIES  = "POST_SERIES"    # after a full series ends
 
+# ----------------- Sound Manager -----------------
+class SoundManager:
+    """
+    Minimal SFX helper. Generates tiny .wav files on first run into ./assets and loads them.
+    No numpy required.
+    """
+    def __init__(self, base_dir):
+        self.base_dir = base_dir
+        self.assets_dir = os.path.join(self.base_dir, "assets")
+        os.makedirs(self.assets_dir, exist_ok=True)
+
+        # Paths
+        self.wall_path   = os.path.join(self.assets_dir, "wall.wav")
+        self.paddle_path = os.path.join(self.assets_dir, "paddle.wav")
+        self.score_path  = os.path.join(self.assets_dir, "score.wav")
+
+        # Generate if missing
+        if not os.path.exists(self.wall_path):
+            self._generate_tone(self.wall_path, freq=600, duration_ms=70, volume=0.35)
+        if not os.path.exists(self.paddle_path):
+            self._generate_tone(self.paddle_path, freq=440, duration_ms=55, volume=0.40)
+        if not os.path.exists(self.score_path):
+            self._generate_tone(self.score_path, freq=220, duration_ms=120, volume=0.45)
+
+        # Safe mixer init
+        if not pygame.mixer.get_init():
+            try:
+                pygame.mixer.init()
+            except Exception:
+                # If mixer fails (no audio device), we'll no-op on play
+                pass
+
+        # Load sounds (may be None if mixer unavailable)
+        self.snd_wall   = self._load(self.wall_path)
+        self.snd_paddle = self._load(self.paddle_path)
+        self.snd_score  = self._load(self.score_path)
+
+        # Simple rate-limit to avoid spam
+        self._last_play = {"wall": 0, "paddle": 0, "score": 0}
+        self._min_gap_ms = 40
+
+    def _generate_tone(self, path, freq=440, duration_ms=100, volume=0.5, sample_rate=44100):
+        n_samples = int(sample_rate * (duration_ms / 1000.0))
+        with wave.open(path, "w") as wf:
+            wf.setnchannels(1)      # mono
+            wf.setsampwidth(2)      # 16-bit
+            wf.setframerate(sample_rate)
+            for i in range(n_samples):
+                # simple sine fade-out
+                t = i / sample_rate
+                amp = volume * (1.0 - i / n_samples)  # linear decay
+                sample = int(amp * 32767 * math.sin(2 * math.pi * freq * t))
+                wf.writeframes(struct.pack("<h", sample))
+
+    def _load(self, path):
+        try:
+            return pygame.mixer.Sound(path)
+        except Exception:
+            return None
+
+    def _try_play(self, key, sound):
+        if sound is None:
+            return
+        now = pygame.time.get_ticks()
+        if now - self._last_play.get(key, 0) >= self._min_gap_ms:
+            sound.play()
+            self._last_play[key] = now
+
+    def play_wall(self):
+        self._try_play("wall", self.snd_wall)
+
+    def play_paddle(self):
+        self._try_play("paddle", self.snd_paddle)
+
+    def play_score(self):
+        self._try_play("score", self.snd_score)
+
+# ----------------- Game Engine -----------------
 class GameEngine:
     def __init__(self, width, height):
         self.width = width
@@ -24,8 +106,13 @@ class GameEngine:
         self.ai = Paddle(width - 20, height // 2 - 50, self.paddle_width, self.paddle_height)
         self.ball = Ball(width // 2, height // 2, 10, 10, width, height)
 
+        # --- Sounds ---
+        self.sfx = SoundManager(base_dir=os.path.dirname(os.path.abspath(__file__)))
+        # Hook ball callbacks
+        self.ball.set_callbacks(on_wall_bounce=self.sfx.play_wall,
+                                on_paddle_bounce=self.sfx.play_paddle)
+
         # --- Rules ---
-        # Points required to win a single game
         self.points_to_win_game = 5
 
         # Series state — initially OFF. First game is standalone.
@@ -39,13 +126,13 @@ class GameEngine:
         # Per-game scoreboard
         self.player_score = 0
         self.ai_score = 0
-        self.game_winner = None           # "Player" / "AI" for the last finished game
-        self.last_game_winner = None      # remembered for menus
+        self.game_winner = None
+        self.last_game_winner = None
 
         # Menu
         self.menu_options = ["Best of 3", "Best of 5", "Best of 7", "Exit"]
         self.menu_index = 0
-        self.menu_context = MENU_FIRST_CHOICE
+        self.menu_context = "FIRST_CHOICE"
 
         # UI
         self.font = pygame.font.SysFont("Arial", 30)
@@ -53,22 +140,24 @@ class GameEngine:
         self.small_font = pygame.font.SysFont("Arial", 22)
 
         # Input state (player)
-        self._move_dir = 0  # -1 up, +1 down, 0 idle
+        self._move_dir = 0
 
         # Game state
         self.state = STATE_PLAYING
         self.request_quit = False
 
-        # Intermission timer (between games in an active series)
+        # Intermission
         self._intermission_start_ms = None
-        self._intermission_ms = 1100  # ms
+        self._intermission_ms = 1100
 
-        # --- Fairer AI tuning ---
-        self.ai.speed = 340      # slower than player's 420
-        self._ai_deadzone = 12
-        self._ai_reaction_ms = 90
+        # --- Easier AI tuning (even easier than before) ---
+        # Make AI noticeably more forgiving.
+        self.ai.speed = 260           # ↓ from 340
+        self._ai_deadzone = 18        # ↑ bigger deadzone (ignores small offsets)
+        self._ai_reaction_ms = 140    # ↑ slower reactions
         self._ai_last_update_ms = 0
         self._ai_move_dir = 0
+        self._ai_center_bias = 0.35   # tendency to drift back to center when ball moving away
 
     # ---------- Helpers ----------
     def _center_paddles(self):
@@ -76,7 +165,6 @@ class GameEngine:
         self.ai.y = self.height // 2 - self.paddle_height // 2
 
     def _reset_game(self):
-        """Reset scores for a single game and serve again."""
         self.player_score = 0
         self.ai_score = 0
         self.game_winner = None
@@ -89,33 +177,26 @@ class GameEngine:
         return best_of // 2 + 1
 
     def _apply_menu_choice_start_series(self, label: str):
-        """From FIRST_CHOICE menu: start a new series with selected Best-of."""
         if label == "Exit":
             self.request_quit = True
             return
-        if "3" in label:
-            self.series_best = 3
-        elif "5" in label:
-            self.series_best = 5
-        elif "7" in label:
-            self.series_best = 7
-        else:
-            self.series_best = 3
+        if "3" in label:   self.series_best = 3
+        elif "5" in label: self.series_best = 5
+        elif "7" in label: self.series_best = 7
+        else:              self.series_best = 3
 
         self.series_games_to_win = self._games_needed(self.series_best)
         self.series_player_wins = 0
         self.series_ai_wins = 0
         self.series_winner = None
         self.series_active = True
-        self.menu_context = MENU_POST_SERIES  # future menus will be post-series
-        self._reset_game()  # start first series game immediately
+        self.menu_context = "POST_SERIES"
+        self._reset_game()
 
     def _apply_menu_choice_post_series(self, label: str):
-        """From POST_SERIES menu: either start another series or exit."""
         if label == "Exit":
             self.request_quit = True
             return
-        # Same mapping as above
         self._apply_menu_choice_start_series(label)
 
     def _start_intermission(self):
@@ -178,7 +259,7 @@ class GameEngine:
                         choice = self.menu_options[self.menu_index]
 
                     if choice:
-                        if self.menu_context == MENU_FIRST_CHOICE:
+                        if self.menu_context == "FIRST_CHOICE":
                             self._apply_menu_choice_start_series(choice)
                         else:
                             self._apply_menu_choice_post_series(choice)
@@ -196,18 +277,37 @@ class GameEngine:
         if self.state != STATE_PLAYING:
             return
 
-        # --- Fairer AI decisions ---
+        # --- Easier AI decisions ---
         now = pygame.time.get_ticks()
+        ball_moving_right = self.ball.vx > 0
+
+        # Update AI decision only every reaction window
         if (now - self._ai_last_update_ms) >= self._ai_reaction_ms:
             self._ai_last_update_ms = now
-            target = self.ball.y + self.ball.height / 2.0
+
+            # If the ball is moving away from the AI, bias towards drifting to center
+            target_y = self.height / 2.0 if not ball_moving_right else (self.ball.y + self.ball.height / 2.0)
             ai_center = self.ai.y + self.ai.height / 2.0
-            if target < ai_center - self._ai_deadzone:
+
+            if target_y < ai_center - self._ai_deadzone:
                 self._ai_move_dir = -1
-            elif target > ai_center + self._ai_deadzone:
+            elif target_y > ai_center + self._ai_deadzone:
                 self._ai_move_dir = +1
             else:
                 self._ai_move_dir = 0
+
+            # Add a small random “human error”
+            if ball_moving_right and random_chance(0.08):
+                self._ai_move_dir = 0
+
+        # When ball moving away, occasionally drift toward center slowly
+        if not ball_moving_right and self._ai_move_dir == 0:
+            # Center drift (very gentle)
+            center = self.height / 2.0
+            if self.ai.y + self.ai.height / 2.0 < center - 8:
+                self._ai_move_dir = +1 if random_chance(self._ai_center_bias) else 0
+            elif self.ai.y + self.ai.height / 2.0 > center + 8:
+                self._ai_move_dir = -1 if random_chance(self._ai_center_bias) else 0
 
         if self._ai_move_dir != 0:
             self.ai.move_speed(self._ai_move_dir, dt, self.height)
@@ -217,9 +317,11 @@ class GameEngine:
 
         if self.ball.x + self.ball.width < 0:
             self.ai_score += 1
+            self.sfx.play_score()
             self.ball.reset(direction=1)
         elif self.ball.x > self.width:
             self.player_score += 1
+            self.sfx.play_score()
             self.ball.reset(direction=-1)
 
         # Game end (points_to_win_game)
@@ -228,30 +330,28 @@ class GameEngine:
             self.last_game_winner = self.game_winner
 
             if not self.series_active:
-                # First standalone game just finished — prompt to start a series
+                # First standalone game finished — prompt to start a series
                 self.state = STATE_REPLAY_MENU
-                self.menu_context = MENU_FIRST_CHOICE
+                self.menu_context = "FIRST_CHOICE"
                 self.menu_index = 0
                 return
 
-            # If already in a series: tally and continue/end series
+            # Series accounting
             if self.game_winner == "Player":
                 self.series_player_wins += 1
             else:
                 self.series_ai_wins += 1
 
             if self._end_series_if_needed():
-                # Series winner decided -> show menu for next series or exit
                 self.state = STATE_REPLAY_MENU
-                self.menu_context = MENU_POST_SERIES
+                self.menu_context = "POST_SERIES"
                 self.menu_index = 0
             else:
-                # Another game in the series
                 self._start_intermission()
 
     # ---------- Render ----------
     def render(self, screen):
-        # Field & entities (always draw for consistent background)
+        # Field & entities
         pygame.draw.rect(screen, WHITE, self.player.rect())
         pygame.draw.rect(screen, WHITE, self.ai.rect())
         pygame.draw.ellipse(screen, WHITE, self.ball.rect())
@@ -263,10 +363,10 @@ class GameEngine:
         screen.blit(player_text, (self.width//4, 20))
         screen.blit(ai_text, (self.width * 3//4, 20))
 
-        # HUD: series info (ONLY when a series is active)
+        # HUD: series info
         if self.series_active:
             series_label = self.small_font.render(
-                f"Series: Player {self.series_player_wins} - {self.series_ai_wins} AI   (Best of {self.series_best}; First to {self.series_games_to_win})",
+                f"Series: Player {self.series_player_wins} - {self.series_ai_wins} AI   (Best of {self.series_best}; First to {self._games_needed(self.series_best)})",
                 True, WHITE
             )
             screen.blit(series_label, series_label.get_rect(midtop=(self.width//2, 8)))
@@ -274,7 +374,7 @@ class GameEngine:
             info = self.small_font.render("Single game (first to 5).", True, WHITE)
             screen.blit(info, info.get_rect(midtop=(self.width//2, 8)))
 
-        # INTERMISSION overlay (between games in an active series)
+        # INTERMISSION overlay
         if self.state == STATE_SERIES_INTERMISSION:
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill(OVERLAY_DARK)
@@ -287,19 +387,17 @@ class GameEngine:
             sub = self.small_font.render("Next game starting... (Press Enter/Space to skip)", True, WHITE)
             screen.blit(sub, sub.get_rect(center=(self.width // 2, self.height // 2 + 36)))
 
-        # REPLAY MENU (two contexts)
+        # REPLAY MENU
         if self.state == STATE_REPLAY_MENU:
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill(OVERLAY_DARK)
             screen.blit(overlay, (0, 0))
 
-            if self.menu_context == MENU_FIRST_CHOICE:
-                # After the first standalone game
+            if self.menu_context == "FIRST_CHOICE":
                 title_text = f"{self.last_game_winner} won the first game!"
                 prompt_text = "Start a series. Choose a length:"
             else:
-                # After a full series ends
-                title_text = f"{self.series_winner} wins the series!"
+                title_text = f"{getattr(self, 'series_winner', 'Someone')} wins the series!" if self.series_active else f"{self.last_game_winner} won the last game!"
                 prompt_text = "Play another series? Choose a length:"
 
             title = self.big_font.render(title_text, True, WHITE)
@@ -308,7 +406,6 @@ class GameEngine:
             prompt = self.font.render(prompt_text, True, WHITE)
             screen.blit(prompt, prompt.get_rect(center=(self.width // 2, self.height // 2 - 60)))
 
-            # Menu options
             base_y = self.height // 2 - 10
             spacing = 36
             for i, label in enumerate(self.menu_options):
@@ -320,3 +417,9 @@ class GameEngine:
             hint2 = self.small_font.render("Hotkeys: 3 / 5 / 7 for best-of; Esc/Q to quit.", True, WHITE)
             screen.blit(hint1, hint1.get_rect(center=(self.width // 2, base_y + spacing * (len(self.menu_options) + 0.8))))
             screen.blit(hint2, hint2.get_rect(center=(self.width // 2, base_y + spacing * (len(self.menu_options) + 1.6))))
+
+# ---- tiny helper ----
+def random_chance(p: float) -> bool:
+    # simple replacement for random.random() < p without importing random at top-level twice
+    import random
+    return random.random() < p
