@@ -2,8 +2,6 @@ import pygame
 from .paddle import Paddle
 from .ball import Ball
 
-# Game Engine
-
 WHITE = (255, 255, 255)
 
 class GameEngine:
@@ -13,33 +11,47 @@ class GameEngine:
         self.paddle_width = 10
         self.paddle_height = 100
 
+        # Paddles: left (player) and right (AI)
         self.player = Paddle(10, height // 2 - 50, self.paddle_width, self.paddle_height)
         self.ai = Paddle(width - 20, height // 2 - 50, self.paddle_width, self.paddle_height)
-        self.ball = Ball(width // 2, height // 2, 7, 7, width, height)
+
+        # Ball uses px/sec velocities internally; width/height here are the sprite size
+        self.ball = Ball(width // 2, height // 2, 10, 10, width, height)
 
         self.player_score = 0
         self.ai_score = 0
         self.font = pygame.font.SysFont("Arial", 30)
 
-    def handle_input(self):
+        # Input state
+        self._move_dir = 0  # -1 up, +1 down, 0 idle
+
+    def handle_input(self, dt: float):
         keys = pygame.key.get_pressed()
+        move_dir = 0
         if keys[pygame.K_w]:
-            self.player.move(-10, self.height)
+            move_dir -= 1
         if keys[pygame.K_s]:
-            self.player.move(10, self.height)
+            move_dir += 1
+        self._move_dir = move_dir
 
-    def update(self):
-        self.ball.move()
-        self.ball.check_collision(self.player, self.ai)
+        # Apply player movement w.r.t dt
+        if self._move_dir != 0:
+            self.player.move_speed(self._move_dir, dt, self.height)
 
-        if self.ball.x <= 0:
+    def update(self, dt: float):
+        # AI tracks the ball with dt-based speed
+        self.ai.auto_track(self.ball, self.height, dt)
+
+        # Move ball with sub-stepped integration to avoid tunneling
+        self.ball.advance(dt, self.player, self.ai)
+
+        # Scoring
+        if self.ball.x + self.ball.width < 0:
             self.ai_score += 1
-            self.ball.reset()
-        elif self.ball.x >= self.width:
+            self.ball.reset(direction=1)  # send towards player
+        elif self.ball.x > self.width:
             self.player_score += 1
-            self.ball.reset()
-
-        self.ai.auto_track(self.ball, self.height)
+            self.ball.reset(direction=-1)  # send towards AI
 
     def render(self, screen):
         # Draw paddles and ball
