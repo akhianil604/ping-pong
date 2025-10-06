@@ -6,9 +6,11 @@ WHITE = (255, 255, 255)
 OVERLAY_DARK = (0, 0, 0, 180)
 
 STATE_PLAYING = "PLAYING"
-STATE_GAME_OVER = "GAME_OVER"            # Series is over; show winner + replay menu
 STATE_REPLAY_MENU = "REPLAY_MENU"
-STATE_SERIES_INTERMISSION = "INTERMISSION"  # Between games inside a series
+STATE_SERIES_INTERMISSION = "INTERMISSION"
+
+MENU_FIRST_CHOICE = "FIRST_CHOICE"   # after the very first standalone game
+MENU_POST_SERIES  = "POST_SERIES"    # after a full series ends
 
 class GameEngine:
     def __init__(self, width, height):
@@ -26,19 +28,24 @@ class GameEngine:
         # Points required to win a single game
         self.points_to_win_game = 5
 
-        # Series settings (Best of N games) -> first to games_to_win wins the series
+        # Series state — initially OFF. First game is standalone.
+        self.series_active = False
         self.series_best = 3
+        self.series_games_to_win = self._games_needed(self.series_best)
         self.series_player_wins = 0
         self.series_ai_wins = 0
-        self.series_games_to_win = self._games_needed(self.series_best)
+        self.series_winner = None
 
         # Per-game scoreboard
         self.player_score = 0
         self.ai_score = 0
+        self.game_winner = None           # "Player" / "AI" for the last finished game
+        self.last_game_winner = None      # remembered for menus
 
-        # Replay / Menu
+        # Menu
         self.menu_options = ["Best of 3", "Best of 5", "Best of 7", "Exit"]
         self.menu_index = 0
+        self.menu_context = MENU_FIRST_CHOICE
 
         # UI
         self.font = pygame.font.SysFont("Arial", 30)
@@ -50,21 +57,18 @@ class GameEngine:
 
         # Game state
         self.state = STATE_PLAYING
-        self.game_winner = None   # "Player" or "AI" for a single game
-        self.series_winner = None # "Player" or "AI" for the series
         self.request_quit = False
 
-        # Timers
+        # Intermission timer (between games in an active series)
         self._intermission_start_ms = None
-        self._intermission_ms = 1100  # time to show "Player won game X" before next game
+        self._intermission_ms = 1100  # ms
 
         # --- Fairer AI tuning ---
-        # Make AI less perfect: slower max speed and human-like reaction delay
-        self.ai.speed = 340                # player speed is 420 in paddle.py; AI slower
-        self._ai_deadzone = 12             # don't react to tiny offsets to reduce jitter
-        self._ai_reaction_ms = 90          # only picks a new direction every N ms
+        self.ai.speed = 340      # slower than player's 420
+        self._ai_deadzone = 12
+        self._ai_reaction_ms = 90
         self._ai_last_update_ms = 0
-        self._ai_move_dir = 0              # -1 up, +1 down, 0 idle
+        self._ai_move_dir = 0
 
     # ---------- Helpers ----------
     def _center_paddles(self):
@@ -84,12 +88,11 @@ class GameEngine:
     def _games_needed(self, best_of: int) -> int:
         return best_of // 2 + 1
 
-    def _apply_menu_choice(self, idx: int):
-        label = self.menu_options[idx]
+    def _apply_menu_choice_start_series(self, label: str):
+        """From FIRST_CHOICE menu: start a new series with selected Best-of."""
         if label == "Exit":
             self.request_quit = True
             return
-
         if "3" in label:
             self.series_best = 3
         elif "5" in label:
@@ -99,26 +102,32 @@ class GameEngine:
         else:
             self.series_best = 3
 
-        # Reset the series
+        self.series_games_to_win = self._games_needed(self.series_best)
         self.series_player_wins = 0
         self.series_ai_wins = 0
-        self.series_games_to_win = self._games_needed(self.series_best)
         self.series_winner = None
-        # Start first game
-        self._reset_game()
+        self.series_active = True
+        self.menu_context = MENU_POST_SERIES  # future menus will be post-series
+        self._reset_game()  # start first series game immediately
+
+    def _apply_menu_choice_post_series(self, label: str):
+        """From POST_SERIES menu: either start another series or exit."""
+        if label == "Exit":
+            self.request_quit = True
+            return
+        # Same mapping as above
+        self._apply_menu_choice_start_series(label)
 
     def _start_intermission(self):
         self.state = STATE_SERIES_INTERMISSION
         self._intermission_start_ms = pygame.time.get_ticks()
 
-    def _end_series_if_needed(self):
+    def _end_series_if_needed(self) -> bool:
         if self.series_player_wins >= self.series_games_to_win:
             self.series_winner = "Player"
-            self.state = STATE_GAME_OVER
             return True
         if self.series_ai_wins >= self.series_games_to_win:
             self.series_winner = "AI"
-            self.state = STATE_GAME_OVER
             return True
         return False
 
@@ -140,42 +149,45 @@ class GameEngine:
             return
 
         if self.state == STATE_SERIES_INTERMISSION:
-            # Allow skipping intermission with Enter/Space/R if you want
+            # Allow skipping with Enter/Space/R
             for event in events:
                 if event.type == pygame.KEYDOWN and event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_r):
                     self._reset_game()
                     return
-            # Otherwise timer drives it
-            return
-
-        if self.state == STATE_GAME_OVER:
-            # Immediately go to replay menu (no auto close)
-            self.state = STATE_REPLAY_MENU
             return
 
         if self.state == STATE_REPLAY_MENU:
             for event in events:
                 if event.type == pygame.KEYDOWN:
-                    # Quick numeric shortcuts
+                    # Hotkeys
                     if event.key == pygame.K_3:
-                        self._apply_menu_choice(0); return
-                    if event.key == pygame.K_5:
-                        self._apply_menu_choice(1); return
-                    if event.key == pygame.K_7:
-                        self._apply_menu_choice(2); return
+                        choice = "Best of 3"
+                    elif event.key == pygame.K_5:
+                        choice = "Best of 5"
+                    elif event.key == pygame.K_7:
+                        choice = "Best of 7"
+                    else:
+                        choice = None
+
                     # Navigate/select
                     if event.key in (pygame.K_UP, pygame.K_w):
                         self.menu_index = (self.menu_index - 1) % len(self.menu_options)
                     elif event.key in (pygame.K_DOWN, pygame.K_s):
                         self.menu_index = (self.menu_index + 1) % len(self.menu_options)
                     elif event.key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_r):
-                        self._apply_menu_choice(self.menu_index); return
+                        choice = self.menu_options[self.menu_index]
+
+                    if choice:
+                        if self.menu_context == MENU_FIRST_CHOICE:
+                            self._apply_menu_choice_start_series(choice)
+                        else:
+                            self._apply_menu_choice_post_series(choice)
+                        return
             return
 
     # ---------- Update ----------
     def update(self, dt: float):
         if self.state == STATE_SERIES_INTERMISSION:
-            # Auto-continue when timer elapses
             if self._intermission_start_ms is not None:
                 if pygame.time.get_ticks() - self._intermission_start_ms >= self._intermission_ms:
                     self._reset_game()
@@ -184,7 +196,7 @@ class GameEngine:
         if self.state != STATE_PLAYING:
             return
 
-        # --- Fairer AI: throttle direction decisions ---
+        # --- Fairer AI decisions ---
         now = pygame.time.get_ticks()
         if (now - self._ai_last_update_ms) >= self._ai_reaction_ms:
             self._ai_last_update_ms = now
@@ -197,39 +209,49 @@ class GameEngine:
             else:
                 self._ai_move_dir = 0
 
-        # Move AI with the last chosen direction (gives that reaction feel)
         if self._ai_move_dir != 0:
             self.ai.move_speed(self._ai_move_dir, dt, self.height)
 
-        # Ball movement (Task 1: sub-stepping/tunneling fix)
+        # Ball & scoring (per game)
         self.ball.advance(dt, self.player, self.ai)
 
-        # Scoring checks for a single GAME
         if self.ball.x + self.ball.width < 0:
             self.ai_score += 1
-            self.ball.reset(direction=1)  # send towards player
+            self.ball.reset(direction=1)
         elif self.ball.x > self.width:
             self.player_score += 1
-            self.ball.reset(direction=-1)  # send towards AI
+            self.ball.reset(direction=-1)
 
-        # Win condition for a single GAME (to points_to_win_game)
+        # Game end (points_to_win_game)
         if self.player_score >= self.points_to_win_game or self.ai_score >= self.points_to_win_game:
             self.game_winner = "Player" if self.player_score > self.ai_score else "AI"
+            self.last_game_winner = self.game_winner
 
-            # Update series tallies
+            if not self.series_active:
+                # First standalone game just finished — prompt to start a series
+                self.state = STATE_REPLAY_MENU
+                self.menu_context = MENU_FIRST_CHOICE
+                self.menu_index = 0
+                return
+
+            # If already in a series: tally and continue/end series
             if self.game_winner == "Player":
                 self.series_player_wins += 1
             else:
                 self.series_ai_wins += 1
 
-            # Is the SERIES over now?
-            if not self._end_series_if_needed():
-                # Not over: small intermission, then next game
+            if self._end_series_if_needed():
+                # Series winner decided -> show menu for next series or exit
+                self.state = STATE_REPLAY_MENU
+                self.menu_context = MENU_POST_SERIES
+                self.menu_index = 0
+            else:
+                # Another game in the series
                 self._start_intermission()
 
     # ---------- Render ----------
     def render(self, screen):
-        # Field & entities (only draw paddles/ball during active play or intermission)
+        # Field & entities (always draw for consistent background)
         pygame.draw.rect(screen, WHITE, self.player.rect())
         pygame.draw.rect(screen, WHITE, self.ai.rect())
         pygame.draw.ellipse(screen, WHITE, self.ball.rect())
@@ -241,14 +263,18 @@ class GameEngine:
         screen.blit(player_text, (self.width//4, 20))
         screen.blit(ai_text, (self.width * 3//4, 20))
 
-        # HUD: series info
-        series_label = self.small_font.render(
-            f"Series: Player {self.series_player_wins} - {self.series_ai_wins} AI   (Best of {self.series_best}; First to {self.series_games_to_win})",
-            True, WHITE
-        )
-        screen.blit(series_label, series_label.get_rect(midtop=(self.width//2, 8)))
+        # HUD: series info (ONLY when a series is active)
+        if self.series_active:
+            series_label = self.small_font.render(
+                f"Series: Player {self.series_player_wins} - {self.series_ai_wins} AI   (Best of {self.series_best}; First to {self.series_games_to_win})",
+                True, WHITE
+            )
+            screen.blit(series_label, series_label.get_rect(midtop=(self.width//2, 8)))
+        else:
+            info = self.small_font.render("Single game (first to 5).", True, WHITE)
+            screen.blit(info, info.get_rect(midtop=(self.width//2, 8)))
 
-        # INTERMISSION overlay (between games)
+        # INTERMISSION overlay (between games in an active series)
         if self.state == STATE_SERIES_INTERMISSION:
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill(OVERLAY_DARK)
@@ -261,31 +287,28 @@ class GameEngine:
             sub = self.small_font.render("Next game starting... (Press Enter/Space to skip)", True, WHITE)
             screen.blit(sub, sub.get_rect(center=(self.width // 2, self.height // 2 + 36)))
 
-        # SERIES GAME OVER (series winner) leads to REPLAY MENU
-        if self.state == STATE_GAME_OVER:
-            overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
-            overlay.fill(OVERLAY_DARK)
-            screen.blit(overlay, (0, 0))
-
-            line1 = f"{self.series_winner} wins the series!"
-            title = self.big_font.render(line1, True, WHITE)
-            screen.blit(title, title.get_rect(center=(self.width // 2, self.height // 2 - 8)))
-
-            sub = self.small_font.render("Opening replay options...", True, WHITE)
-            screen.blit(sub, sub.get_rect(center=(self.width // 2, self.height // 2 + 40)))
-
+        # REPLAY MENU (two contexts)
         if self.state == STATE_REPLAY_MENU:
             overlay = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
             overlay.fill(OVERLAY_DARK)
             screen.blit(overlay, (0, 0))
 
-            title = self.big_font.render(f"{self.series_winner} wins the series!", True, WHITE)
+            if self.menu_context == MENU_FIRST_CHOICE:
+                # After the first standalone game
+                title_text = f"{self.last_game_winner} won the first game!"
+                prompt_text = "Start a series. Choose a length:"
+            else:
+                # After a full series ends
+                title_text = f"{self.series_winner} wins the series!"
+                prompt_text = "Play another series? Choose a length:"
+
+            title = self.big_font.render(title_text, True, WHITE)
             screen.blit(title, title.get_rect(center=(self.width // 2, self.height // 2 - 120)))
 
-            prompt = self.font.render("Play again? Choose a series length:", True, WHITE)
+            prompt = self.font.render(prompt_text, True, WHITE)
             screen.blit(prompt, prompt.get_rect(center=(self.width // 2, self.height // 2 - 60)))
 
-            # Options
+            # Menu options
             base_y = self.height // 2 - 10
             spacing = 36
             for i, label in enumerate(self.menu_options):
