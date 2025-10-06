@@ -10,7 +10,6 @@ SCREEN = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Ping Pong - Pygame Version")
 
 # Colors
-WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 
 # Clock
@@ -24,17 +23,25 @@ def main():
     running = True
     while running:
         dt = clock.tick(FPS) / 1000.0  # seconds since last frame
+        events = pygame.event.get()
 
-        SCREEN.fill(BLACK)
-        for event in pygame.event.get():
+        # Window close
+        for event in events:
             if event.type == pygame.QUIT:
                 running = False
 
-        engine.handle_input(dt)
+        # Handle input & update game state
+        engine.handle_input(events, dt)
         engine.update(dt)
-        engine.render(SCREEN)
 
+        # Render
+        SCREEN.fill(BLACK)
+        engine.render(SCREEN)
         pygame.display.flip()
+
+        # Allow engine to request quit (e.g., from Game Over screen)
+        if engine.request_quit:
+            running = False
 
     pygame.quit()
 
