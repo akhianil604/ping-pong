@@ -150,14 +150,15 @@ class GameEngine:
         self._intermission_start_ms = None
         self._intermission_ms = 1100
 
-        # --- Easier AI tuning (even easier than before) ---
-        # Make AI noticeably more forgiving.
-        self.ai.speed = 260           # ↓ from 340
-        self._ai_deadzone = 18        # ↑ bigger deadzone (ignores small offsets)
-        self._ai_reaction_ms = 140    # ↑ slower reactions
+        # --- Competitive AI tuning (fair but tougher) ---
+        # Slightly faster paddle, quicker reactions, smaller deadzone,
+        # fewer random "misses", and weaker center drift.
+        self.ai.speed = 320           # was 260
+        self._ai_deadzone = 14        # was 18
+        self._ai_reaction_ms = 110    # was 140
         self._ai_last_update_ms = 0
         self._ai_move_dir = 0
-        self._ai_center_bias = 0.35   # tendency to drift back to center when ball moving away
+        self._ai_center_bias = 0.22   # was 0.35 (drifts back to center less often)
 
     # ---------- Helpers ----------
     def _center_paddles(self):
@@ -297,7 +298,7 @@ class GameEngine:
                 self._ai_move_dir = 0
 
             # Add a small random “human error”
-            if ball_moving_right and random_chance(0.08):
+            if ball_moving_right and random_chance(0.03):
                 self._ai_move_dir = 0
 
         # When ball moving away, occasionally drift toward center slowly
