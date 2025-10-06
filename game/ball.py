@@ -44,30 +44,38 @@ class Ball:
             self.vy = -self.vy
 
     def _paddle_bounce(self, paddle):
-        # Place ball flush against paddle and reflect
-        if self.vx > 0:
+        # Determine which side we hit based on incoming direction
+        incoming_right = self.vx > 0
+
+        # Place ball flush outside the paddle with a small epsilon to avoid re-collisions
+        if incoming_right:
             # hit right paddle
-            self.x = paddle.x - self.width
+            self.x = paddle.x - self.width - 1  # 1px epsilon
+            out_dir = -1  # move left after bounce
         else:
             # hit left paddle
-            self.x = paddle.x + paddle.width
+            self.x = paddle.x + paddle.width + 1
+            out_dir = +1  # move right after bounce
 
-        # Deflection: based on contact point vs paddle center
+        # Deflection based on where we hit relative to paddle center
         paddle_center = paddle.center_y()
         rel = (self.center_y() - paddle_center) / (paddle.height / 2.0)  # [-1, 1]
         rel = max(-1.0, min(1.0, rel))
 
-        # Compute new angle: up to ~45° deflection
-        max_angle = math.radians(45)
+        max_angle = math.radians(45)  # up to ±45°
         angle = rel * max_angle
+
+        # Increase speed slightly per paddle hit, clamp to max
         speed = min(self.speed() * self.speed_increase, self.max_speed)
-        # Ensure ball moves away from paddle
-        self.vx = speed * (1 if self.vx < 0 else -1) * math.cos(angle) * -1
+
+        # Set velocities so the ball moves AWAY from the paddle
+        self.vx = out_dir * speed * math.cos(angle)
         self.vy = speed * math.sin(angle)
 
-        # If angle is too flat, give a tiny vertical nudge to avoid boring rallies
+        # Nudge tiny vertical if nearly flat to avoid boring straight lines
         if abs(self.vy) < 60:
-            self.vy = math.copysign(60, self.vy if self.vy != 0 else rel or 1)
+            self.vy = math.copysign(60, self.vy if self.vy != 0 else (rel or 1))
+
 
     def speed(self):
         return math.hypot(self.vx, self.vy)
