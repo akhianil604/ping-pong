@@ -63,8 +63,7 @@ class GameEngine:
         # Global hotkeys (work in any state)
         for event in events:
             if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
-                    # Quit from anywhere
+                if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     self.request_quit = True
 
         if self.state == STATE_PLAYING:
@@ -79,10 +78,12 @@ class GameEngine:
 
             if self._move_dir != 0:
                 self.player.move_speed(self._move_dir, dt, self.height)
+            return  # nothing else to do in PLAYING
 
-        elif self.state == STATE_GAME_OVER:
-            # After short delay, accept input for restart or quit
+        if self.state == STATE_GAME_OVER:
             now = pygame.time.get_ticks()
+
+            # Initialize the timer if needed
             if self._game_over_started_ms is None:
                 self._game_over_started_ms = now
 
@@ -91,18 +92,18 @@ class GameEngine:
             if can_accept:
                 for event in events:
                     if event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_r:
-                            # Restart the whole match
+                        if event.key in (pygame.K_r, pygame.K_RETURN, pygame.K_SPACE):
+                            # Restart the whole match and exit this handler immediately
                             self._reset_match()
-                        elif event.key == pygame.K_RETURN or event.key == pygame.K_SPACE:
-                            # Also restart for convenience
-                            self._reset_match()
-                        elif event.key == pygame.K_ESCAPE or event.key == pygame.K_q:
+                            return
+                        elif event.key in (pygame.K_ESCAPE, pygame.K_q):
                             self.request_quit = True
+                            return
 
-            # Auto-quit after a while if no input
-            if (now - self._game_over_started_ms) >= self._auto_quit_after_ms:
-                self.request_quit = True
+            # Auto-quit only if we're STILL in GAME_OVER and timer exists
+            if self.state == STATE_GAME_OVER and self._game_over_started_ms is not None:
+                if (now - self._game_over_started_ms) >= self._auto_quit_after_ms:
+                    self.request_quit = True
 
     # ---------- Update ----------
     def update(self, dt: float):
